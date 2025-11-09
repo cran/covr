@@ -80,6 +80,7 @@
 #' @import methods
 #' @importFrom stats aggregate na.omit na.pass setNames
 #' @importFrom utils capture.output getSrcFilename relist str head
+#' @importFrom httr content RETRY upload_file
 NULL
 
 the <- new.env(parent = emptyenv())
@@ -93,6 +94,8 @@ trace_environment <- function(env) {
       replacements_S4(env),
       replacements_RC(env),
       replacements_R6(env),
+      replacements_S7(env),
+      replacements_box(env),
       lapply(ls(env, all.names = TRUE), replacement, env = env)))
 
   lapply(the$replacements, replace)
@@ -363,7 +366,7 @@ package_coverage <- function(path = ".",
                              code = character(),
                              install_path = temp_file("R_LIBS"),
                              ...,
-                             exclusions, pre_clean=TRUE) {
+                             exclusions, pre_clean = TRUE) {
 
   if (!missing(exclusions)) {
     warning(
@@ -408,23 +411,20 @@ package_coverage <- function(path = ".",
     root <- NULL
   }
 
+  # tools::testInstalledPackage requires normalized install_path (#517)
+  install_path <- normalize_path(install_path)
   dir.create(install_path)
-
-  flags <- getOption("covr.flags")
 
   # check for compiler
   if (!uses_icc()) {
     flags <- getOption("covr.flags")
-  }
-  else {
-    if (length(getOption("covr.icov")) > 0L) {
-      flags <- getOption("covr.icov_flags")
-      # clean up old icov files
-      unlink(file.path(pkg$path, "src","*.dyn"))
-      unlink(file.path(pkg$path, "src","pgopti.*"))
-    } else {
-      stop("icc is not available")
-    }
+  } else if (length(getOption("covr.icov")) > 0L) {
+    flags <- getOption("covr.icov_flags")
+    # clean up old icov files
+    unlink(file.path(pkg$path, "src", "*.dyn"))
+    unlink(file.path(pkg$path, "src", "pgopti.*"))
+  } else {
+    stop("icc is not available")
   }
 
   if (isTRUE(clean)) {
@@ -440,18 +440,35 @@ package_coverage <- function(path = ".",
   if (isTRUE(pre_clean)) clean_objects(pkg$path)
 
   # install the package in a temporary directory
-  withr::with_makevars(flags, assignment = "+=",
-    utils::install.packages(repos = NULL,
-                            lib = install_path,
-                            pkg$path,
-                            type = "source",
-                            INSTALL_opts = c("--example",
-                                             "--install-tests",
-                                             "--with-keep.source",
-                                             "--with-keep.parse.data",
-                                             "--no-staged-install",
-                                             "--no-multiarch"),
-                            quiet = quiet))
+  withr::with_envvar(
+    list(R_LIBS = paste(.libPaths(), collapse = .Platform$path.sep)),
+    withr::with_makevars(flags, assignment = "+=", {
+      args <- c(
+        "--vanilla", "CMD", "INSTALL",
+        "-l", shQuote(install_path),
+        "--example",
+        "--install-tests",
+        "--with-keep.source",
+        "--with-keep.parse.data",
+        "--no-staged-install",
+        "--no-multiarch",
+        shQuote(pkg$path)
+      )
+
+      name <- if (.Platform$OS.type == "windows") "R.exe" else "R"
+      path <- file.path(R.home("bin"), name)
+      res <- system2(
+        path,
+        args,
+        stdout = if (quiet) NULL else "",
+        stderr = if (quiet) NULL else ""
+      )
+    })
+  )
+
+  if (res != 0) {
+    stop("Package installation did not succeed.")
+  }
 
   # add hooks to the package startup
   add_hooks(pkg$package, install_path,
@@ -688,7 +705,7 @@ merge_coverage_tests <- function(from, into = NULL) {
   # modify trace test tallies
   for (name in intersect(names(into), names(from))) {
     if (name == "tests") next
-    from[[name]]$tests$tally[,1L] <- test_idx[from[[name]]$tests$tally[,1L]]
+    from[[name]]$tests$tally[, 1L] <- test_idx[from[[name]]$tests$tally[, 1L]]
     into[[name]]$tests$tally <- rbind(into[[name]]$tests$tally, from[[name]]$tests$tally)
   }
 
@@ -769,7 +786,7 @@ add_hooks <- function(pkg_name, lib, fix_mcexit = FALSE,
   trace_dir <- paste0("Sys.getenv(\"COVERAGE_DIR\", \"", lib, "\")")
 
   load_script <- file.path(lib, pkg_name, "R", pkg_name)
-  lines <- readLines(file.path(lib, pkg_name, "R", pkg_name))
+  lines <- readLines(load_script)
   lines <- append(lines,
     c(paste0("setHook(packageEvent(pkg, \"onLoad\"), function(...) options(covr.record_tests = ", record_tests, "))"),
       "setHook(packageEvent(pkg, \"onLoad\"), function(...) covr:::trace_environment(ns))",

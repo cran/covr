@@ -12,7 +12,7 @@
 
 <meta name="author" content="Jim Hester" />
 
-<meta name="date" content="2023-11-08" />
+<meta name="date" content="2025-11-06" />
 
 <title>How does covr work anyway?</title>
 
@@ -62,7 +62,7 @@ div.sourceCode { overflow: auto; }
 }
 @media print {
 pre > code.sourceCode { white-space: pre-wrap; }
-pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
 }
 pre.numberSource code
 { counter-reset: source-line 0; }
@@ -340,7 +340,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">How does covr work anyway?</h1>
 <h4 class="author">Jim Hester</h4>
-<h4 class="date">2023-11-08</h4>
+<h4 class="date">2025-11-06</h4>
 
 
 
@@ -460,11 +460,10 @@ in a different environment.</p>
 <span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>env<span class="sc">$</span><span class="fu">f2</span>() <span class="sc">==</span> <span class="dv">3</span></span></code></pre></div>
 <pre><code>## [1] FALSE</code></pre>
 <p>As modifying external environments and correctly restoring them can
-be tricky to get correct, we use the C function <a href="https://github.com/r-lib/covr/blob/9753e0e257b053059b85be90ef6eb614a5af9bba/src/reassign.c#L7-L20"><code>reassign_function</code></a>,
-which is also used in <code>testthat::with_mock</code>. This function
-takes a function name, environment, old definition, new definition and
-copies the formals, body, attributes and environment from the old
-function to the new function. This allows you to do an in-place
+be tricky to get correct, we use the C function <a href="https://github.com/r-lib/covr/blob/40122df12bc9ef1e577dd0720a895b5340b1516f/src/reassign.c#L65-L135"><code>covr_reassign_function</code></a>.
+This function takes a function name, environment, old definition, new
+definition and copies the formals, body, attributes and environment from
+the old function to the new function. This allows you to do an in-place
 replacement of a given function with a new function and ensure that all
 references to the old function will use the new definition.</p>
 </div>
@@ -558,13 +557,9 @@ call.</p>
 <span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a><span class="co"># get results with no unit tests</span></span>
 <span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>c1 <span class="ot">&lt;-</span> <span class="fu">function_coverage</span>(<span class="at">fun =</span> f1, <span class="at">code =</span> <span class="cn">NULL</span>)</span>
 <span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>c1</span></code></pre></div>
-<pre><code>## Coverage: 0.00%</code></pre>
-<pre><code>## &lt;text&gt;: 0.00%</code></pre>
-<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a><span class="co"># get results with unit tests</span></span>
-<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>c2 <span class="ot">&lt;-</span> <span class="fu">function_coverage</span>(<span class="at">fun =</span> f1, <span class="at">code =</span> <span class="fu">f1</span>(<span class="at">x =</span> <span class="dv">1</span>) <span class="sc">==</span> <span class="dv">2</span>)</span>
-<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>c2</span></code></pre></div>
-<pre><code>## Coverage: 100.00%</code></pre>
-<pre><code>## &lt;text&gt;: 100.00%</code></pre>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="co"># get results with unit tests</span></span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>c2 <span class="ot">&lt;-</span> <span class="fu">function_coverage</span>(<span class="at">fun =</span> f1, <span class="at">code =</span> <span class="fu">f1</span>(<span class="at">x =</span> <span class="dv">1</span>) <span class="sc">==</span> <span class="dv">2</span>)</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>c2</span></code></pre></div>
 <p>An <code>as.data.frame</code> method is available to make subsetting
 by various features easy to do.</p>
 <p>While <strong>covr</strong> tracks coverage by expression, typically
