@@ -5,9 +5,17 @@
 #' Uses the [pages](https://docs.gitlab.com/user/project/pages/)
 #' GitLab job to publish the report.
 #' @inheritParams codecov
-#' @inheritParams report
+#' @param file The path of the HTML report, relative to the root directory of
+#'   the package (not the working directory). Directories that don't exist are
+#'   created.
+#' @returns The path of the report, invisibly.
 #' @export
-gitlab <- function(..., coverage = NULL, file = "public/coverage.html", quiet = TRUE) {
+gitlab <- function(
+  ...,
+  coverage = NULL,
+  file = "public/coverage.html",
+  quiet = TRUE
+) {
   if (is.null(coverage)) {
     coverage <- package_coverage(quiet = quiet, ...)
   }
@@ -15,14 +23,7 @@ gitlab <- function(..., coverage = NULL, file = "public/coverage.html", quiet = 
     print(coverage)
   }
 
-  out_file <- file.path(tempfile(), file)
-  on.exit(unlink(out_dir, recursive = TRUE), add = TRUE)
-
-  out_dir <- dirname(out_file)
-
   pkg_path <- attributes(coverage)$package$path
 
-  report(coverage, file = out_file, browse = FALSE)
-
-  file.copy(out_dir, pkg_path, recursive = TRUE)
+  invisible(report(coverage, file = file.path(pkg_path, file), browse = FALSE))
 }

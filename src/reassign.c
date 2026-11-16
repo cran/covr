@@ -1,5 +1,6 @@
 #define USE_RINTERNALS
 #include <R.h>
+#include <Rversion.h>
 #include <Rinternals.h>
 #include <R_ext/Error.h>
 #include <R_ext/Rdynload.h>
@@ -37,15 +38,15 @@ void CheckBody(SEXP x) {
   case S4SXP: // renamed to OBJSXP
     return;
 
-  default:
-    error("Unexpected closure body type");
+  default: // # nocov start
+    error("Unexpected closure body type"); // # nocov end
   }
 }
 
 inline static
 void CheckEnvironment(SEXP x) {
   if(TYPEOF(x) != ENVSXP)
-    error("Unexpected closure env type");
+    error("Unexpected closure env type"); // # nocov
 }
 
 inline static
@@ -55,26 +56,23 @@ void CheckFormals(SEXP ls) {
   if (isList(ls)) {
     for (; ls != R_NilValue; ls = CDR(ls))
       if (TYPEOF(TAG(ls)) != SYMSXP)
-        goto err;
+        goto err; // # nocov
     return;
   }
-  err:
-    error("Unexpected closure formals");
+  err: // # nocov start
+    error("Unexpected closure formals"); // # nocov end
 }
 
 SEXP covr_reassign_function(SEXP old_fun, SEXP new_fun) {
   if (TYPEOF(old_fun) != CLOSXP) error("old_fun must be a function");
   if (TYPEOF(new_fun) != CLOSXP) error("new_fun must be a function");
+  if (old_fun == new_fun) return R_NilValue;
 
   // The goal is to modify `old_fun` in place, so that all existing references
   // to `old_fun` call the tracing `new_fun` instead.
-  // This used to be simply:
-  //   SET_FORMALS(old_fun, FORMALS(new_fun));
-  //   SET_BODY(old_fun, BODY(new_fun));
-  //   SET_CLOENV(old_fun, CLOENV(new_fun));
-  // But those functions are now "non-API". So we comply with the letter of the
-  // law and swap the fields manually, making some hard assumptions about the
-  // underlying memory layout in the process.
+  // Newer R versions no longer expose the closure setters. We copy the fields
+  // manually below, but first trigger R's write barrier through its attribute
+  // API so an old closure can safely reference the replacement's younger fields.
   // Rather than using memcpy() with a hard-coded byte offset, we mirror the R
   // internals SEXPREC struct defs here, to hopefully match the alignment
   // behavior of R (e.g., on windows).
@@ -126,10 +124,22 @@ SEXP covr_reassign_function(SEXP old_fun, SEXP new_fun) {
   MARK_NOT_MUTABLE(new->u.closxp.env);
   MARK_NOT_MUTABLE(new->u.closxp.formals);
 
+  // A raw field copy bypasses R's generational-GC write barrier. Install a
+  // temporary attribute pointing to new_fun through the barrier-aware API.
+  // The copy must be shallow so it references the exact incoming closure.
+  SEXP anchor = PROTECT(Rf_allocVector(VECSXP, 0));
+  Rf_setAttrib(anchor, Rf_install("covr_gc_anchor"), new_fun);
+  SHALLOW_DUPLICATE_ATTRIB(old_fun, anchor);
+
+  // R now either remembers old_fun for scanning or has aged the incoming
+  // reference graph. Removing the attribute does not undo that bookkeeping.
   old->u.closxp = new->u.closxp;
 
-  // Duplicate attributes is still not "non-API", thankfully.
+  // Restore the replacement's attributes and object/S4 flags, removing the
+  // temporary anchor. No permanent GC roots or extra user-visible attributes
+  // remain after reassignment.
   DUPLICATE_ATTRIB(old_fun, new_fun);
+  UNPROTECT(1);
 
   return R_NilValue;
 }
@@ -137,13 +147,81 @@ SEXP covr_reassign_function(SEXP old_fun, SEXP new_fun) {
 
 SEXP covr_duplicate_(SEXP x) { return duplicate(x); }
 
+// The address of an object, used to track objects by identity.
+SEXP covr_address(SEXP x) {
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%p", (void *)x);
+  return mkString(buf);
+}
+
+// Whether `name` in `env` is a promise that has not been evaluated yet, checked
+// without forcing it.
+SEXP covr_is_unforced_promise(SEXP env, SEXP name) {
+  SEXP sym = installChar(STRING_ELT(name, 0));
+#if R_VERSION >= R_Version(4, 6, 0)
+  // findVarInFrame3() and PRVALUE() are no longer in the API in R 4.6
+  return ScalarLogical(R_GetBindingType(sym, env) == R_BindingTypeDelayed);
+#else
+  SEXP value = findVarInFrame3(env, sym, FALSE);
+  return ScalarLogical(TYPEOF(value) == PROMSXP &&
+                       PRVALUE(value) == R_UnboundValue);
+#endif
+}
+
+// A weak reference to the environment `x`, which doesn't keep `x` from being
+// garbage collected.
+SEXP covr_weakref(SEXP x) {
+  return R_MakeWeakRef(x, R_NilValue, R_NilValue, FALSE);
+}
+
+// The environment referenced by `ref`, or `NULL` if it was garbage collected.
+SEXP covr_weakref_key(SEXP ref) { return R_WeakRefKey(ref); }
+
+static Rboolean has_closure(SEXP x) {
+  switch (TYPEOF(x)) {
+  case CLOSXP:
+    return TRUE;
+  case LANGSXP:
+    for (; x != R_NilValue; x = CDR(x)) {
+      if (has_closure(CAR(x))) return TRUE;
+    }
+    return FALSE;
+  default:
+    return FALSE;
+  }
+}
+
+// Whether `x` is a function (other than a primitive), or a call containing one
+// in any of its nested calls.
+SEXP covr_has_closure(SEXP x) { return ScalarLogical(has_closure(x)); }
+
 /* .Call calls */
 extern SEXP covr_duplicate_(SEXP);
 extern SEXP covr_reassign_function(SEXP, SEXP);
+extern SEXP covr_address(SEXP);
+extern SEXP covr_is_unforced_promise(SEXP, SEXP);
+extern SEXP covr_weakref(SEXP);
+extern SEXP covr_weakref_key(SEXP);
+extern SEXP covr_has_closure(SEXP);
+extern SEXP covr_counter_add(SEXP);
+extern SEXP covr_count(SEXP);
+extern SEXP covr_counter_take(void);
+extern SEXP covr_counter_reset(void);
+extern SEXP covr_write_llvm_profile(SEXP);
 
 static const R_CallMethodDef CallEntries[] = {
     {"covr_duplicate_", (DL_FUNC)&covr_duplicate_, 1},
     {"covr_reassign_function", (DL_FUNC)&covr_reassign_function, 2},
+    {"covr_address", (DL_FUNC)&covr_address, 1},
+    {"covr_is_unforced_promise", (DL_FUNC)&covr_is_unforced_promise, 2},
+    {"covr_weakref", (DL_FUNC)&covr_weakref, 1},
+    {"covr_weakref_key", (DL_FUNC)&covr_weakref_key, 1},
+    {"covr_has_closure", (DL_FUNC)&covr_has_closure, 1},
+    {"covr_counter_add", (DL_FUNC)&covr_counter_add, 1},
+    {"covr_count", (DL_FUNC)&covr_count, 1},
+    {"covr_counter_take", (DL_FUNC)&covr_counter_take, 0},
+    {"covr_counter_reset", (DL_FUNC)&covr_counter_reset, 0},
+    {"covr_write_llvm_profile", (DL_FUNC)&covr_write_llvm_profile, 1},
     {NULL, NULL, 0}};
 
 void R_init_covr(DllInfo *dll) {

@@ -10,94 +10,76 @@ compact <- function(x) {
   x[viapply(x, length) != 0]
 }
 
-trim <- function(x) {
-  rex::re_substitutes(x, rex::rex(list(start, spaces) %or% list(spaces, end)),  "", global = TRUE)
-}
 
 local_branch <- function(dir = ".") {
-  withr::with_dir(dir,
+  withr::with_dir(
+    dir,
     branch <- system_output("git", c("rev-parse", "--abbrev-ref", "HEAD"))
   )
-  trim(branch)
+  trimws(branch)
 }
 
 current_commit <- function(dir = ".") {
-  withr::with_dir(dir,
-    commit <- system_output("git", c("rev-parse", "HEAD"))
-  )
-  trim(commit)
+  withr::with_dir(dir, commit <- system_output("git", c("rev-parse", "HEAD")))
+  trimws(commit)
 }
 
+#' @export
 `[.coverage` <- function(x, i, ...) {
   attrs <- attributes(x)
   attrs$names <- attrs$names[i]
   res <- unclass(x)
   res <- res[i]
+  if (!is.null(attrs$branches)) {
+    attrs$branches <- subset_branches(attrs$branches, res)
+  }
   attributes(res) <- attrs
   res
 }
 
 to_title <- function(x) {
-  rex::re_substitutes(x,
-                      rex::rex(rex::regex("\\b"), capture(any)),
-                      "\\U\\1",
-                      global = TRUE)
-}
-
-srcfile_lines <- function(srcfile) {
-  lines <- getSrcLines(srcfile, 1, Inf)
-  matches <- rex::re_matches(lines,
-    rex::rex(start, any_spaces, "#line", spaces,
-      capture(name = "line_number", digit), spaces,
-      quotes, capture(name = "filename", anything), quotes))
-
-  matches <- na.omit(matches)
-
-  filename_match <- which(matches$filename == srcfile$filename)
-
-  if (length(filename_match) == 1) {
-
-     # rownames(matches) is the line number of lines
-    start <- as.numeric(rownames(matches)[filename_match]) + 1
-
-    # If there is another directive we want to stop at that, otherwise stop at
-    # the end
-    end <- if (!is.na(rownames(matches)[filename_match + 1])) {
-      as.numeric(rownames(matches)[filename_match + 1]) - 1
-    } else {
-      length(lines)
-    }
-
-    # If there are no line directives for the file just use the entire file
-  } else {
-    start <- 1
-    end <- length(lines)
-  }
-
-  res <- lines[seq(start, end)]
-
-  # Track blank or comment lines so they can be excluded from the result calculations, but only for R files
-  if (rex::re_matches(srcfile$filename, rex::rex(".", one_of("r", "R"), end))) {
-    attr(res, "blanks") <- which(rex::re_matches(res, rex::rex(start, any_spaces, maybe("#", anything), end)))
-  }
-  res
+  rex::re_substitutes(
+    x,
+    rex::rex(rex::regex("\\b"), capture(any)),
+    "\\U\\1",
+    global = TRUE
+  )
 }
 
 # Split lines into a list based on the line directives in the file.
 split_on_line_directives <- function(lines) {
-  matches <- rex::re_matches(lines,
-    rex::rex(start, any_spaces, "#line", spaces,
-      capture(name = "line_number", digit), spaces,
-      quotes, capture(name = "filename", anything), quotes))
+  matches <- rex::re_matches(
+    lines,
+    rex::rex(
+      start,
+      any_spaces,
+      "#line",
+      spaces,
+      capture(name = "line_number", digit),
+      spaces,
+      quotes,
+      capture(name = "filename", anything),
+      quotes
+    )
+  )
   directive_lines <- which(!is.na(matches$line_number))
   if (!length(directive_lines)) {
     return(NULL)
   }
 
+  # Shiny's `sourceUTF8()` wraps the lines of an app's file as
+  # `c("..stacktraceon..({", '#line 1 "<file>"', <lines>, "})")`, so the
+  # closing line isn't part of the file (#761)
+  n <- length(lines)
+  if (n > 1 && lines[[1]] == "..stacktraceon..({" && lines[[n]] == "})") {
+    n <- n - 1
+  }
   file_starts <- directive_lines + 1
-  file_ends <- c(directive_lines[-1] - 1, length(lines))
+  file_ends <- c(directive_lines[-1] - 1, n)
+  # An empty file has no lines between its directive and the next one (or the
+  # end), so `file_ends` is one less than `file_starts` (#522)
   res <- mapply(
-    function(start, end) lines[start:end],
+    function(start, end) lines[seq.int(start, length.out = end - start + 1)],
     file_starts,
     file_ends,
     SIMPLIFY = FALSE
@@ -109,35 +91,28 @@ split_on_line_directives <- function(lines) {
 traced_files <- function(x) {
   res <- list()
   filenames <- display_name(x)
-  for (i in seq_along(x)) {
+  # The (concatenated) source is shared by many files, so read and split it
+  # once per original srcfile rather than once per file.
+  originals <- new.env(parent = emptyenv())
+  for (i in which(filenames != "" & !duplicated(filenames))) {
     src_file <- attr(x[[i]]$srcref, "srcfile")
     filename <- filenames[[i]]
 
-    if (filename == "") next
-    if (!is.null(res[[filename]])) next
-
-    lines <- getSrcLines(src_file, 1, Inf)
-    matches <- rex::re_matches(lines,
-      rex::rex(start, any_spaces, "#line", spaces,
-        capture(name = "line_number", digit), spaces,
-        quotes, capture(name = "filename", anything), quotes))
-
-    matches <- na.omit(matches)
-
-    filename_match <- which(matches$filename == src_file$filename)
-
-    if (length(filename_match) == 1) {
-      start <- as.numeric(rownames(matches)[filename_match]) + 1
-      end <- if (!is.na(rownames(matches)[filename_match + 1])) {
-        as.numeric(rownames(matches)[filename_match + 1]) - 1
-      } else {
-        length(lines)
-      }
-    } else {
-      start <- 1
-      end <- length(lines)
+    id <- address(src_file$original %||% src_file)
+    source <- originals[[id]]
+    if (is.null(source)) {
+      lines <- getSrcLines(src_file, 1, Inf)
+      source <- list(lines = lines, split = split_on_line_directives(lines))
+      originals[[id]] <- source
     }
-    src_file$file_lines <- lines[seq(start, end)]
+
+    # Use the section for this file only if it is unambiguous
+    split <- source$split
+    if (sum(names(split) == src_file$filename) == 1) {
+      src_file$file_lines <- split[[src_file$filename]]
+    } else {
+      src_file$file_lines <- source$lines
+    }
 
     res[[filename]] <- src_file
   }
@@ -145,87 +120,105 @@ traced_files <- function(x) {
 }
 
 per_line <- function(coverage) {
-  df <- as.data.frame(coverage)
-
-  # In rare cases the source reference such as generated code onload the source
-  # reference will not exists, so the first_line will be NA
-  df <- df[!is.na(df$first_line), ]
-
   files <- traced_files(coverage)
+  lines <- collapse_lines(tally_coverage(coverage, by = "line"))
 
-  # Lines with only spaces or only comments
-  blank_lines <- lapply(files, function(file) {
-    which(rex::re_matches(file$file_lines, rex::rex(start, any_spaces, maybe("#", anything), end)))
-  })
-
-  # lines with only })], or an else block
-  empty_lines <- lapply(files, function(file) {
-    which(rex::re_matches(file$file_lines, "^(?:[[:punct:][:space:]]|else)*$"))
-  })
-
-  file_lengths <- lapply(files, function(file) {
-    length(file$file_lines)
-  })
-
-  res <- lapply(file_lengths,
-    function(x) {
-      rep(NA_real_, length.out = x)
-  })
-
-  # df is sorted by file and first line ascending, so we store the maximum
-  # last_line seen to detect if the previous expression contains the current
-  # expression.
-  max_last <- 0
-  prev_filename <- ""
-
-  for (i in seq_len(NROW(df))) {
-    filename <- df[i, "filename"]
-    for (line in seq(df[i, "first_line"], df[i, "last_line"])) {
-
-      # if it is not a blank line or empty line
-      if (!line %in% c(blank_lines[[filename]], empty_lines[[filename]])) {
-
-        value <- df[i, "value"]
-        # if current coverage is NA or last line < max last line
-        if (is.na(res[[filename]][line]) || line < max_last || (line == max_last && res[[filename]][line] > value)) {
-          res[[filename]][line] <- value
-        }
-
-        if (df[i, "filename"] != prev_filename) {
-          prev_filename <- df[i, "filename"]
-          max_last <- 0
-        }
-        if (df[i, "last_line"] > max_last) {
-          max_last <- df[i, "last_line"]
-        }
-      }
-    }
-  }
   structure(
-    Map(function(file, coverage) {
-      structure(list(file = file, coverage = coverage), class = "line_coverage")
-    },
-    files, res),
-    class = "line_coverages")
-}
-
-if (getRversion() < "3.2.0") {
-  isNamespaceLoaded <- function(x) x %in% loadedNamespaces()
+    Map(
+      function(file, filename) {
+        values <- rep(NA_real_, length.out = length(file$file_lines))
+        file_lines <- lines[lines$filename == filename, , drop = FALSE]
+        values[file_lines$line] <- file_lines$value
+        structure(
+          list(file = file, coverage = values),
+          class = "line_coverage"
+        )
+      },
+      files,
+      names(files)
+    ),
+    class = "line_coverages"
+  )
 }
 
 is_windows <- function() {
   .Platform$OS.type == "windows"
 }
 
+# Signal errors and warnings formatted by cli without needing rlang. `message`
+# is a cli bullet vector interpolated in `.envir`; `output` lines (e.g. from an
+# external command or server) are appended as is; `...` adds condition fields.
+covr_abort <- function(
+  message,
+  ...,
+  output = NULL,
+  class = NULL,
+  .envir = parent.frame()
+) {
+  stop(structure(
+    list(
+      message = cnd_message(cli::format_error, message, output, .envir),
+      call = NULL,
+      ...
+    ),
+    class = c(class, "error", "condition")
+  ))
+}
+
+covr_warn <- function(
+  message,
+  ...,
+  output = NULL,
+  class = NULL,
+  .envir = parent.frame()
+) {
+  warning(structure(
+    list(
+      message = cnd_message(cli::format_warning, message, output, .envir),
+      call = NULL,
+      ...
+    ),
+    class = c(class, "warning", "condition")
+  ))
+}
+
+# The deprecated functions that have warned in this session.
+deprecation_warned <- new.env(parent = emptyenv())
+
+# Warn that `old()` is deprecated in favor of `new()`, once per session. With
+# `interactive_only = TRUE`, only warn in interactive sessions, for functions
+# that scripts such as CI workflows commonly call.
+warn_deprecated <- function(old, new, interactive_only = FALSE) {
+  if (interactive_only && !rlang::is_interactive()) {
+    return(invisible())
+  }
+  if (isTRUE(deprecation_warned[[old]])) {
+    return(invisible())
+  }
+  deprecation_warned[[old]] <- TRUE
+  covr_warn(c(
+    "{.fn {old}} is deprecated.",
+    i = "Use {.fn {new}} instead."
+  ))
+}
+
+cnd_message <- function(format, message, output, .envir) {
+  paste(c(format(message, .envir = .envir), output), collapse = "\n")
+}
+
 as_package <- function(path) {
+  input <- path
   path <- normalize_path(path)
   if (!file.exists(path)) {
-    stop("`path` is invalid: ", path, call. = FALSE)
+    covr_abort(c(
+      "{.arg path} must be an existing directory.",
+      x = "{.path {input}} doesn't exist."
+    ))
   }
   root <- package_root(path)
 
   if (is.null(root)) {
-    stop(sQuote(path), " does not contain a package!", call. = FALSE)
+    covr_abort("Can't find a package in {.path {path}}.")
   }
 
   res <- read_description(file.path(root, "DESCRIPTION"))
@@ -256,9 +249,30 @@ package_root <- function(path) {
   }
 }
 
+is_installed_package <- function(path) {
+  file.exists(file.path(path, "Meta", "package.rds"))
+}
+
+# The directory of the source an installed package was installed from, the
+# parent of the `R` directory with the files in the srcrefs of its traces, or
+# `NULL` if it was installed without srcrefs. The namespace can also have
+# functions with srcrefs from elsewhere, e.g. other packages, so this is the
+# directory with the most traces.
+installed_source_path <- function(traces) {
+  files <- vcapply(traces, function(x) {
+    get_source_filename(x$srcref, full.names = TRUE)
+  })
+  files <- files[grepl("/R/", files, fixed = TRUE)]
+  if (length(files) == 0) {
+    return(NULL)
+  }
+  dirs <- sub("^(.*)/R/.*$", "\\1", files)
+  names(which.max(table(dirs)))
+}
+
 read_description <- function(path) {
   if (!length(path) || !file.exists(path)) {
-    stop("DESCRIPTION file not found at ", sQuote(path), call. = FALSE)
+    covr_abort("Can't find a DESCRIPTION file at {.path {path}}.")
   }
 
   res <- as.list(read.dcf(path)[1, ])
@@ -267,32 +281,23 @@ read_description <- function(path) {
 }
 
 clean_objects <- function(path) {
-  files <- list.files(file.path(path, "src"),
-                      pattern = rex::rex(".",
-                        or("o", "sl", "so", "dylib",
-                          "a", "dll"), end),
-                      full.names = TRUE, recursive = TRUE)
+  files <- list.files(
+    file.path(path, "src"),
+    pattern = rex::rex(".", or("o", "sl", "so", "dylib", "a", "dll"), end),
+    recursive = TRUE
+  )
+  # cargo rebuilds what it needs, but doesn't notice when the libraries built
+  # by build scripts (e.g. savvy's) are removed from its `target` directory, so
+  # leave the directories of Rust code's dependencies and build output alone.
+  if (length(rust_manifests(path))) {
+    files <- files[!in_rust_dependency_dir(files)]
+  }
+  files <- file.path(path, "src", files)
   unlink(files)
 
   invisible(files)
 }
 
-# This is not actually an S3 method
-# From http://stackoverflow.com/a/34639237/2055486
-setdiff.data.frame <- function(x, y,
-    by = intersect(names(x), names(y)),
-    by.x = by, by.y = by) {
-  stopifnot(
-    is.data.frame(x),
-    is.data.frame(y),
-    length(by.x) == length(by.y))
-
-  !do.call(paste, c(x[by.x], sep = "\30")) %in% do.call(paste, c(y[by.y], sep = "\30"))
-}
-
-`%==%` <- function(x, y) identical(x, y)
-
-`%!=%` <- function(x, y) !identical(x, y)
 
 is_na <- function(x) {
   !is.null(x) && !is.symbol(x) && is.na(x)
@@ -302,18 +307,10 @@ is_brace <- function(x) {
   is.symbol(x) && as.character(x) == "{"
 }
 
-modify_name <- function(expr, old, new) {
-  replace <- function(e)
-    if (is.name(e) && identical(e, as.name(old))) e <- as.name(new)
-     else if (length(e) <= 1L) e
-     else as.call(lapply(e, replace))
-  replace(expr)
+# A mockable `requireNamespace()`, so tests can simulate a missing package.
+is_installed <- function(pkg) {
+  requireNamespace(pkg, quietly = TRUE)
 }
-
-
-# This is the fix for https://bugs.r-project.org/bugzilla3/show_bug.cgi?id=16659
-match_arg <- base::match.arg
-body(match_arg) <- modify_name(body(match_arg), "all", "any")
 
 # from https://github.com/wch/r-source/blob/2065bd3c09813949e9fa7236d167f1b7ed5c8ba3/src/library/tools/R/check.R#L4134-L4137
 env_path <- function(...) {
@@ -323,8 +320,80 @@ env_path <- function(...) {
 
 normalize_path <- function(x) {
   path <- normalizePath(x, winslash = "/", mustWork = FALSE)
-  # Strip any trailing slashes as they are invalid on windows
-  sub("/*$", "", path)
+  # Strip trailing slashes as they are invalid on windows, but keep those of
+  # roots: "/" and "C:/" (which, unlike "C:", is not relative to a directory).
+  root <- grepl("^([A-Za-z]:)?/+$", path)
+  path[!root] <- sub("/+$", "", path[!root])
+  path[root] <- sub("/+$", "/", path[root])
+  path
+}
+
+# Settings that are given as an option or as an environment variable are read
+# in this order: the option, then the environment variable (if it is not
+# empty), then the default.
+string_setting <- function(option, envvar, default) {
+  getOption(option) %||% non_empty(Sys.getenv(envvar, "")) %||% default
+}
+
+# Like `string_setting()` for a logical setting, which can be given as `TRUE`
+# or `FALSE`, or as a string: "true", "t", "yes" or "1", and "false", "f", "no"
+# or "0", in any case. An invalid value is ignored with a warning, as if it
+# was not set.
+logical_setting <- function(option, envvar, default) {
+  value <- getOption(option)
+  if (!is.null(value)) {
+    parsed <- parse_logical(value)
+    if (!is.na(parsed)) {
+      return(parsed)
+    }
+    covr_warn(c(
+      "Ignoring invalid value {.val {value}} of option {.code {option}}.",
+      i = logical_hint
+    ))
+  }
+  value <- non_empty(Sys.getenv(envvar, ""))
+  if (!is.null(value)) {
+    parsed <- parse_logical(value)
+    if (!is.na(parsed)) {
+      return(parsed)
+    }
+    covr_warn(c(
+      "Ignoring invalid value {.val {value}} of environment variable {.envvar {envvar}}.",
+      i = logical_hint
+    ))
+  }
+  default
+}
+
+logical_hint <- paste0(
+  "Use {.code TRUE}, {.code FALSE}, or a string that is one of ",
+  "{.val true}, {.val t}, {.val yes}, {.val 1}, {.val false}, {.val f}, ",
+  "{.val no} or {.val 0}, in any case."
+)
+
+# `TRUE` or `FALSE`, or `NA` if `x` isn't one of the accepted spellings
+parse_logical <- function(x) {
+  if (is.logical(x) && length(x) == 1L) {
+    return(x)
+  }
+  x <- tolower(trimws(as.character(x)))
+  if (length(x) != 1L) {
+    NA
+  } else if (x %in% c("true", "t", "yes", "1")) {
+    TRUE
+  } else if (x %in% c("false", "f", "no", "0")) {
+    FALSE
+  } else {
+    NA
+  }
+}
+
+non_empty <- function(x) {
+  if (nzchar(x)) x
+}
+
+is_absolute_path <- function(x) {
+  grepl("^(/|~|[A-Za-z]:|\\\\\\\\)", x)
 }
 
 temp_dir <- function() {
@@ -335,10 +404,15 @@ temp_file <- function(pattern = "file", tmpdir = temp_dir(), fileext = "") {
 }
 
 get_package_name <- function(x) {
-   attr(x, "package")$package %||% "coverage"
+  attr(x, "package")$package %||% "coverage"
 }
 
-get_source_filename <- function(x, full.names = FALSE, unique = TRUE, normalize = FALSE) {
+get_source_filename <- function(
+  x,
+  full.names = FALSE,
+  unique = TRUE,
+  normalize = FALSE
+) {
   res <- getSrcFilename(x, full.names, unique)
   if (length(res) == 0) {
     return("")
@@ -354,7 +428,24 @@ vdapply <- function(X, FUN, ...) vapply(X, FUN, ..., FUN.VALUE = numeric(1))
 viapply <- function(X, FUN, ...) vapply(X, FUN, ..., FUN.VALUE = integer(1))
 vlapply <- function(X, FUN, ...) vapply(X, FUN, ..., FUN.VALUE = logical(1))
 
-trim_ws <- function(x) {
-  x <- sub("^[ \t\r\n]+", "", x, perl = TRUE)
-  sub("[ \t\r\n]+$", "", x, perl = TRUE)
+# Names of the bindings in `env` that can be read without side effects: active
+# bindings run arbitrary code (which can fail) when they are read. With
+# `the$skip_lazy_load`, promises to read the saved code of a package that
+# haven't been forced are left out too (see `restore_counters()`).
+inactive_names <- function(env) {
+  nms <- ls(env, all.names = TRUE)
+  nms <- nms[!vlapply(nms, bindingIsActive, env = env)]
+  if (isTRUE(the$skip_lazy_load)) {
+    nms <- nms[!vlapply(nms, is_lazy_load_promise, env = env)]
+  }
+  nms
+}
+
+# Like `eapply(env, FUN, all.names = TRUE)`, but without reading active
+# bindings.
+eapply_inactive <- function(env, FUN) {
+  nms <- inactive_names(env)
+  res <- lapply(nms, function(nm) FUN(get(nm, envir = env, inherits = FALSE)))
+  names(res) <- nms
+  res
 }

@@ -12,11 +12,11 @@ upload the results to a coverage service like 'Codecov' \url{https://about.codec
 code being exercised by a set of tests. It is an indirect measure of test
 quality and completeness. This package is compatible with any testing
 methodology or framework and tracks coverage of both R code and compiled
-C/C++/FORTRAN code.
+C, C++, Fortran and Rust code.
 }
 \details{
 A coverage report can be used to inspect coverage for each line in your
-package. Using \code{report()} requires the additional dependencies \code{DT} and \code{htmltools}.
+package. Using \code{report()} requires the additional dependency \code{htmltools}.
 
 \if{html}{\out{<div class="sourceCode r">}}\preformatted{# If run with no arguments `report()` implicitly calls `package_coverage()`
 report()
@@ -28,11 +28,17 @@ report()
 \code{covr} uses the following \code{\link[=options]{options()}} to configure behaviour:
 
 \itemize{
+\item \code{covr.branch_coverage}: If \code{TRUE} (default \code{FALSE}), also record
+which branches of each \code{if} and \code{switch()} in R code were taken. This
+is experimental. It must be set before the code is instrumented, e.g.
+before calling \code{package_coverage()}. For more details, see
+\code{?covr.branch_coverage}.
+
 \item \code{covr.covrignore}: A filename to use as an ignore file,
 listing glob-style wildcarded paths of files to ignore for coverage
-calculations. Defaults to the value of environment variable
-\code{COVR_COVRIGNORE}, or \code{".covrignore"}  if the neither the option nor the
-environment variable are set.
+calculations. Defaults to the value of the environment variable
+\code{COVR_COVRIGNORE}, or \code{".covrignore"} if neither the option nor the
+environment variable is set.
 
 \item \code{covr.exclude_end}: Used along with \code{covr.exclude_start}, an optional
 regular expression which ends a line-exclusion region. For more
@@ -49,37 +55,122 @@ details, see \code{?exclusions}.
 \item \code{covr.filter_non_package}: If \code{TRUE} (the default behavior), coverage
 of files outside the target package are filtered from coverage output.
 
-\item \code{covr.fix_parallel_mcexit}:
+\item \code{covr.failure_lines}: The number of trailing lines of test output
+shown in the message and \code{print()} method of a \code{covr_error} when tests,
+vignettes, examples or \code{code} fail (default \code{50}). The full output is
+always available in the condition's \verb{$output} field.
 
-\item \code{covr.flags}:
+\item \code{covr.allow_failures}: If \code{TRUE} (default \code{FALSE}), failures or
+errors when running the tests, vignettes, examples or \code{code} of
+\code{package_coverage()} are reported as warnings and coverage is still
+returned, the default of its \code{allow_failures} argument.
 
-\item \code{covr.gcov}: If the appropriate gcov version is not on your path you
-can use this option to set the appropriate location. If set to "" it will
-turn off coverage of compiled code.
+\item \code{covr.annotate_max_lines}: The maximum number of source lines shown
+by \code{\link[=annotate_coverage]{annotate_coverage()}} (default \code{200}), the default of its \code{max_lines}
+argument. \code{Inf} shows everything.
 
-\item \code{covr.gcov_additional_paths}:
+\item \code{covr.print_max_ranges}: The maximum number of missed ranges, and of
+missed branches, listed per file or function by \code{print(x, missing = TRUE)} (default \code{10}). More are summarised as \verb{... (<k> more)}. \code{Inf}
+lists them all.
 
-\item \code{covr.gcov_args}:
+\item \code{covr.fix_parallel_mcexit}: Whether to include code run in processes
+forked by \pkg{parallel}'s \code{mclapply()}, \code{mcparallel()} and related
+functions, by patching \code{parallel:::mcexit}. By default
+\code{package_coverage()} does this if the package uses \pkg{parallel}, and
+the functions that measure coverage in the current session, such as
+\code{file_coverage()}, always do. Can also be set with the environment
+variable \code{COVR_FIX_PARALLEL_MCEXIT}. Not supported on Windows.
 
-\item \code{covr.icov}:
+\item \code{covr.flags}: A named character vector of the compiler and linker
+settings (the values of a \code{Makevars} file, e.g. \code{CFLAGS}) that are added
+when \code{package_coverage()} installs a package, or \code{file_coverage()}
+builds one, for coverage of compiled code. The default, set when covr
+is loaded, compiles C, C++ and Fortran code without optimization and
+with \code{--coverage} (\code{"-O0 --coverage"}) and links it to gcov (\code{FLIBS} is
+\code{"-lgcov"}, \code{LDFLAGS} or on Windows \code{SHLIB_LIBADD} is \code{"--coverage"}).
 
-\item \code{covr.icov_args}:
+\item \code{covr.gcov}: Path to the gcov executable. Defaults to the gcov found
+on your \code{PATH}, or \code{NA} if there is none. If the appropriate gcov version
+is not on your path you can use this option to set the appropriate
+location. If set to \code{""} it will turn off coverage of C, C++ and Fortran
+code, but not of Rust code, which is controlled by \code{covr.llvm_cov}. If
+\code{NA}, covr throws an error if any compiled coverage files (\code{.gcno})
+exist.
 
-\item \code{covr.icov_flags}:
+\item \code{covr.gcov_additional_paths}: A character vector of directories,
+in addition to the package itself, whose compiled source files (C, C++,
+Fortran or Rust) are accepted in the coverage, e.g. the code of another
+package or library that is compiled into the package from outside of its
+\verb{src/} directory. Files elsewhere are left out. Default \code{NULL}.
 
-\item \code{covr.icov_prof}:
+\item \code{covr.gcov_args}: A character vector of additional command line
+arguments passed to gcov. Default \code{NULL}.
+
+\item \code{covr.gcov_partial}: How to count compiled code lines that gcov
+reports as only partially executed (e.g. \code{if (x) f();} when \code{f()} never
+runs). \code{"covered"} (the default) counts them as covered, \code{"uncovered"}
+counts them as not covered, for requiring every part of a line to run.
+This works with both gcc's gcov and llvm-cov (the gcov on macOS).
+llvm-cov can't tell apart code that only runs when a C++ exception is
+thrown, so lines that create objects with destructors may also count as
+partially executed.
+
+\item \code{covr.llvm_cov}: Path to the \code{llvm-cov} used to read the coverage
+of Rust code. Defaults to the one of the Rust toolchain, installed with
+\verb{rustup component add llvm-tools}, or for Rust installed without rustup
+(e.g. with \verb{apt-get install cargo rustc}), to the one on the \code{PATH} with
+the same LLVM version as rustc, e.g. \code{llvm-cov-18}. If set to \code{""} the
+Rust code isn't instrumented, which turns off its coverage. This is
+independent of \code{covr.gcov}, which only controls C, C++ and Fortran code.
+
+\item \code{covr.llvm_profdata}: Path to the \code{llvm-profdata} used to merge the
+coverage counts of Rust code. Found like \code{covr.llvm_cov}.
+
+\item \code{covr.report_colors}: A named character vector with the colors of
+covered and missed lines in \code{\link[=report]{report()}} and \code{\link[=file_report]{file_report()}}, and of the
+coverage percentages printed in the console, e.g.
+\code{c(covered = "#0072B2", missed = "#D55E00")}. \link{colorblind_palette} has
+colors that are easier to tell apart than the default green and red
+with color vision deficiency. Either element can be left out to keep
+its default.
+An optional \code{partial} element sets the color of partial coverage (at
+least 75\% but less than 90\%), which otherwise follows \code{covered}, or is
+yellow in the console if \code{covered} isn't set either, and of lines with
+a branch that wasn't taken in reports with branch coverage, which are
+otherwise yellow. Transparency is ignored. In terminals with only 8
+colors, the console uses the closest of those colors.
 
 \item \code{covr.rstudio_source_markers}: A logical value. If \code{TRUE} (the
 default behavior), source markers are displayed within the RStudio IDE
 when using \code{zero_coverage}.
 
-\item \code{covr.record_tests}: If \code{TRUE} (default \code{NULL}), record a listing of
-top level test expressions and associate tests with \code{covr} traces
+\item \code{covr.record_tests}: If \code{TRUE} (default \code{FALSE}), record a listing
+of top level test expressions and associate tests with \code{covr} traces
 evaluated during the test's execution. For more details, see
 \code{?covr.record_tests}.
 
-\item \code{covr.showCfunctions}:
+\item \code{covr.full_traversal}: If \code{TRUE} (default \code{FALSE}), also trace
+functions nested inside lists and environments, such as
+\code{fns <- list(a = function(x) x)} or functions defined inside \code{local()}.
+This walks every object in the package, so it is off by default. For
+\code{package_coverage()} it can also be enabled for a package by adding
+\code{Config/covr/full_traversal: true} to its DESCRIPTION; the option takes
+precedence when set.
+
+\item \code{covr.install_instrument}: If \code{FALSE} (default \code{TRUE}),
+\code{package_coverage()} installs a package as usual and instruments it each
+time a process loads it, rather than once after installing it. Can also
+be set with the environment variable \code{COVR_INSTALL_INSTRUMENT}.
 }
+
+Some options can also be set with an environment variable. They are read in
+this order: the option, then the environment variable (ignored if it is
+empty), then the default. So an option set in R always takes precedence over
+the environment variable, e.g. \code{COVR_FIX_PARALLEL_MCEXIT=false} has no
+effect if \code{options(covr.fix_parallel_mcexit = TRUE)} is set. Logical
+settings are \code{TRUE} or \code{FALSE}, or for the environment variable (and
+options set to a string), one of \code{true}, \code{t}, \code{yes} or \code{1}, and \code{false},
+\code{f}, \code{no} or \code{0}, in any case. Other values are ignored with a warning.
 }
 
 \seealso{
@@ -93,6 +184,11 @@ Useful links:
 }
 \author{
 \strong{Maintainer}: Jim Hester \email{james.f.hester@gmail.com}
+
+Authors:
+\itemize{
+  \item Jim Hester \email{james.f.hester@gmail.com}
+}
 
 Other contributors:
 \itemize{
@@ -119,10 +215,6 @@ Other contributors:
   \item Qin Wang [contributor]
   \item Doug Kelkhoff [contributor]
   \item Ivan Sagalaev (highlight.js library) [contributor, copyright holder]
-  \item Mark Otto (Bootstrap library) [contributor]
-  \item Jacob Thornton (Bootstrap library) [contributor]
-  \item  Bootstrap contributors (Bootstrap library) [contributor]
-  \item  Twitter, Inc (Bootstrap library) [copyright holder]
 }
 
 }

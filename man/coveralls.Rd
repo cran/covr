@@ -7,8 +7,8 @@
 coveralls(
   ...,
   coverage = NULL,
-  repo_token = Sys.getenv("COVERALLS_TOKEN"),
-  service_name = Sys.getenv("CI_NAME", "travis-ci"),
+  repo_token = env_var("COVERALLS_TOKEN", "COVERALLS_REPO_TOKEN"),
+  service_name = NULL,
   quiet = TRUE
 )
 }
@@ -19,16 +19,48 @@ coveralls(
 \code{\link[=package_coverage]{package_coverage()}} will be called with the arguments from
 \code{...}}
 
-\item{repo_token}{The secret repo token for your repository,
-found at the bottom of your repository's page on Coveralls. This is useful
-if your job is running on a service Coveralls doesn't support out-of-the-box.
-If set to NULL, it is assumed that the job is running on travis-ci}
+\item{repo_token}{The secret repo token for your repository, found on your
+repository's page on Coveralls. The default is the environment variable
+\code{COVERALLS_TOKEN}, or if it is not set, \code{COVERALLS_REPO_TOKEN}, the name
+Coveralls uses for it. Coveralls requires a token (see
+\url{https://docs.coveralls.io/api-jobs-endpoint}). Without one (\code{""} or
+\code{NULL}), only the CI service and job are submitted, which Coveralls rejects
+unless the CI service identifies the repository by itself. With a token,
+information about the git commit, branch and remote is also submitted.}
 
-\item{service_name}{the CI service to use, if environment variable
-\sQuote{CI_NAME} is set that is used, otherwise \sQuote{travis-ci} is used.}
+\item{service_name}{The name of the CI service. If \code{NULL}, the environment
+variable \code{CI_NAME} is used if it is set, otherwise the CI service is
+detected from the environment, e.g. \sQuote{github} on GitHub Actions and
+\sQuote{travis-ci} on Travis CI. Outside a supported CI service it is
+\sQuote{local}.}
 
-\item{quiet}{if \code{FALSE}, print the coverage before submission.}
+\item{quiet}{if \code{FALSE}, print the output of running the tests (see
+\code{\link[=package_coverage]{package_coverage()}}, which is called when \code{coverage} is \code{NULL}) and the
+coverage before submission.}
+}
+\value{
+The response of Coveralls, parsed from JSON, invisibly. If Coveralls
+doesn't accept the upload, \code{coveralls()} throws an error of class
+\code{covr_coveralls_error} with the HTTP status and the response of Coveralls
+in its message.
 }
 \description{
-Run covr on a package and upload the result to coveralls
+On GitHub Actions, use the official
+\href{https://github.com/coverallsapp/github-action}{Coveralls action} instead of
+this function: write the coverage with \code{\link[=cobertura]{cobertura()}} and upload
+\code{cobertura.xml} with \code{coverallsapp/github-action@v2}. See the README for an
+example workflow. With branch coverage, upload the LCOV file written by
+\code{\link[=lcov]{lcov()}} instead, as the action reads which branches were taken from it.
+}
+\details{
+With branch coverage (see \link{covr.branch_coverage}), each source file sent to
+Coveralls also has its \code{branches}: the line, block, branch and count of
+each branch, as in \code{\link[=lcov]{lcov()}}. A branch that was never taken has a count of
+zero.
+
+The CI service, job, pull request, branch and commit are detected from the
+environment variables of the services \code{\link[=codecov]{codecov()}} supports. Anywhere else,
+the branch, commit and remote are looked up from the local git repository.
+The environment variables \code{CI_BRANCH} and \code{CI_REMOTE} override the detected
+branch and remote.
 }

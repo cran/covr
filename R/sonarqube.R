@@ -1,38 +1,89 @@
-#' Create a SonarQube Generic XML file for test coverage according to
-#' https://docs.sonarqube.org/latest/analysis/generic-test/
-#' Based on cobertura.R
+#' Create a SonarQube Generic XML file
+#'
+#' Write coverage in the
+#' [generic test data](https://docs.sonarsource.com/sonarqube-server/analyzing-source-code/test-coverage/generic-test-data)
+#' XML format read by SonarQube.
+#'
+#' Every line with coverage is reported as a `lineToCover` with its `lineNumber`
+#' and whether it is `covered`, including the lines of compiled code. Each line
+#' is reported once: when several functions share a line, it is only covered if
+#' all its code was run, as in [report()] and [percent_coverage()].
+#'
+#' Branches are only reported if they were measured with
+#' `options(covr.branch_coverage = TRUE)` (see [covr.branch_coverage]). A line
+#' where an `if` or `switch()` starts then also has `branchesToCover`, the
+#' number of branches of the `if` and `switch()` calls on the line, and
+#' `coveredBranches`, how many of them were taken.
 #'
 #' This functionality requires the xml2 package be installed.
-#' @param cov the coverage object returned from [package_coverage()]
-#' @param filename the name of the SonarQube Generic XML file
+#' @param x the coverage object returned from [package_coverage()]
+#' @param file the name of the SonarQube Generic XML file
+#' @param path_prefix SonarQube expects file paths relative to the project's
+#'   base directory. By default the paths are relative to the package root
+#'   (e.g. `R/foo.R`), which is correct when the package is the root of the
+#'   SonarQube project. If the package is in a subdirectory of the project,
+#'   set `path_prefix` to that subdirectory (e.g. `"pkg"` gives `pkg/R/foo.R`).
+#' @returns The XML document (an `xml2` document), invisibly, after writing it
+#'   to `file`.
 #' @author Talkdesk Inc.
 #' @export
-to_sonarqube <- function(cov, filename = "sonarqube.xml"){
-
+sonarqube <- function(x, file = "sonarqube.xml", path_prefix = NULL) {
   loadNamespace("xml2")
 
-  df <- tally_coverage(cov, by = "line")
+  # Each line, of R and of compiled code, is reported once, as in `lcov()`.
+  lines <- collapse_lines(tally_coverage(x, by = "line"))
 
-  d <- xml2::xml_new_document()
-
-  top <- xml2::xml_add_child(d, "coverage", version = "1")
-
-  files <- unique(df$filename)
-
-  for (f in files){
-    file <- xml2::xml_add_child(top, "file", path = paste(attr(cov, "package")$package, "/", as.character(f), sep=""))
-
-    for (fun_name in unique(na.omit(df[df$filename == f, "functions"]))) {
-      fun_lines <- which(df$functions == fun_name & df$filename == f)
-      for (i in fun_lines){
-        line <- df[i, ]
-        xml2::xml_add_child(file, "lineToCover", lineNumber = as.character(line$line),
-          covered = tolower(as.character(line$value>0)))
-      }
-    }
+  # Branches are only reported if they were measured.
+  branches <- if (!is.null(attr(x, "branches"))) {
+    line_branch_totals(tally_coverage(x, by = "branch"))
   }
 
-  xml2::write_xml(d, file = filename)
+  files <- unique(lines$filename)
+  paths <- as.character(files)
+  if (!is.null(path_prefix)) {
+    paths <- file.path(path_prefix, paths)
+  }
+
+  # Lines with branches also have the number of branches and how many were
+  # taken.
+  branch_attrs <- character(nrow(lines))
+  if (!is.null(branches)) {
+    b <- match(
+      paste(lines$filename, lines$line),
+      paste(branches$filename, branches$line)
+    )
+    has <- !is.na(b)
+    branch_attrs[has] <- sprintf(
+      ' branchesToCover="%d" coveredBranches="%d"',
+      branches$total[b[has]],
+      branches$taken[b[has]]
+    )
+  }
+
+  # Packages can have thousands of lines, so the document is written as text
+  # and parsed once, which is much faster than adding each line with xml2.
+  line_elements <- sprintf(
+    '<lineToCover lineNumber="%s" covered="%s"%s/>',
+    as.character(lines$line),
+    tolower(as.character(lines$value > 0)),
+    branch_attrs
+  )
+  file_lines <- vapply(
+    split(line_elements, factor(lines$filename, levels = files)),
+    paste,
+    character(1),
+    collapse = ""
+  )
+  d <- xml2::read_xml(paste0(
+    '<coverage version="1">',
+    paste(
+      sprintf('<file path="%s">%s</file>', xml_escape(paths), file_lines),
+      collapse = ""
+    ),
+    "</coverage>"
+  ))
+
+  xml2::write_xml(d, file = file)
 
   invisible(d)
 }

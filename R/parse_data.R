@@ -1,34 +1,165 @@
-#' @importFrom utils getParseData getSrcref tail
 impute_srcref <- function(x, parent_ref) {
-  if (!is_conditional_or_loop(x)) return(NULL)
-  if (is.null(parent_ref)) return(NULL)
+  if (!is_conditional_or_loop(x)) {
+    return(NULL)
+  }
+  children <- parse_children(parent_ref)
+  if (is.null(children)) {
+    return(NULL)
+  }
+  pd_child <- children$pd_child
+  pd <- children$pd
+  make_srcref <- children$make_srcref
+  impute_conditional(x, pd, pd_child, make_srcref)
+}
+
+# Srcrefs for the components of a call without its own srcrefs, used only to
+# find conditionals nested in it (e.g. `x <- if (a) b else c`), so the
+# expressions in their branches get their own counters (#279).
+impute_child_srcrefs <- function(x, parent_ref) {
+  children <- parse_children(parent_ref)
+  if (is.null(children)) {
+    return(NULL)
+  }
+  pd_child <- children$pd_child
+  make_srcref <- children$make_srcref
+  token <- pd_child$token
+  n <- length(token)
+  is_expr <- token == "expr"
+
+  res <- if (token[[1]] == "FUNCTION" || token[[1]] == "'\\\\'") {
+    # function definition: only the body (the last expression) is imputed
+    list(NULL, NULL, make_srcref(max(which(is_expr))), NULL)[seq_along(x)]
+  } else if (n == 3 && is_expr[[1]] && is_expr[[3]] && !is_expr[[2]]) {
+    if (token[[2]] == "RIGHT_ASSIGN") {
+      list(NULL, make_srcref(3), make_srcref(1))
+    } else {
+      list(NULL, make_srcref(1), make_srcref(3))
+    }
+  } else if (n == 2 && is_expr[[2]]) {
+    list(NULL, make_srcref(2))
+  } else if (n == 3 && token[[1]] == "'('" && is_expr[[2]]) {
+    list(NULL, make_srcref(2))
+  } else if (n >= 3 && is_expr[[1]] && token[[2]] %in% c("'('", "'['", "LBB")) {
+    # function call or subset: one argument per separator
+    args <- list()
+    current <- NULL
+    for (i in seq(3, n)) {
+      if (token[[i]] %in% c("','", "')'", "']'")) {
+        args[length(args) + 1L] <- list(current)
+        current <- NULL
+        if (token[[i]] != "','") break
+      } else if (is_expr[[i]]) {
+        current <- make_srcref(i)
+      }
+    }
+    # `f()` has no arguments but still produces one empty slot
+    if (identical(token[[3]], "')'")) {
+      args <- list()
+    }
+    c(list(NULL), args)
+  } else {
+    NULL
+  }
+
+  if (length(res) != length(x)) {
+    return(NULL)
+  }
+  res
+}
+
+# The srcref of the body of a function, given the srcref of the function.
+impute_body_srcref <- function(fun_ref) {
+  children <- parse_children(fun_ref)
+  if (is.null(children)) {
+    return(NULL)
+  }
+  is_expr <- children$pd_child$token == "expr"
+  children$make_srcref(max(which(is_expr)))
+}
+
+# The srcrefs of the default values of the arguments of a function, given the
+# srcref of the function: one element for each argument, `NULL` for an
+# argument without a default.
+impute_formal_srcrefs <- function(fun_ref) {
+  children <- parse_children(fun_ref)
+  if (is.null(children)) {
+    return(NULL)
+  }
+  token <- children$pd_child$token
+  n <- length(token)
+  lapply(which(token == "SYMBOL_FORMALS"), function(i) {
+    if (
+      i + 2L <= n &&
+        token[[i + 1L]] == "EQ_FORMALS" &&
+        token[[i + 2L]] == "expr"
+    ) {
+      children$make_srcref(i + 2L)
+    }
+  })
+}
+
+# Locate `parent_ref` in the parse data and return its child tokens, along with
+# a function to create srcrefs for them.
+parse_children <- function(parent_ref) {
+  if (is.null(parent_ref)) {
+    return(NULL)
+  }
 
   pd <- get_tokens(parent_ref)
+  if (is.null(pd)) {
+    return(NULL)
+  }
   pd_expr <-
-    (
-      (pd$line1 == parent_ref[[1L]] & pd$line2 == parent_ref[[3L]]) |
-      (pd$line1 == parent_ref[[7L]] & pd$line2 == parent_ref[[8L]])
-    ) &
+    ((pd$line1 == parent_ref[[1L]] & pd$line2 == parent_ref[[3L]]) |
+      (pd$line1 == parent_ref[[7L]] & pd$line2 == parent_ref[[8L]])) &
     pd$col1 == parent_ref[[2L]] &
     pd$col2 == parent_ref[[4L]] &
     pd$token == "expr"
   pd_expr_idx <- which(pd_expr)
-  if (length(pd_expr_idx) == 0L) return(NULL) # srcref not found in parse data
+  if (length(pd_expr_idx) == 0L) {
+    return(NULL)
+  } # srcref not found in parse data
 
-  if (length(pd_expr_idx) > 1) pd_expr_idx <- pd_expr_idx[[1]]
+  # Use the first expr if more than one spans the srcref
+  pd_expr_idx <- pd_expr_idx[[1L]]
 
   expr_id <- pd$id[pd_expr_idx]
-  pd_child <- pd[pd$parent == expr_id, ]
-  pd_child <- pd_child[order(pd_child$line1, pd_child$col1), ]
+  # Subset the data frame once, excluding comments, as `[.data.frame` is slow
+  rows <- which(pd$parent == expr_id & pd$token != "COMMENT")
+  rows <- rows[order(pd$line1[rows], pd$col1[rows])]
+  pd_child <- pd[rows, ]
 
-  # exclude comments
-  pd_child <- pd_child[pd_child$token != "COMMENT", ]
-
-  if (pd$line1[pd_expr_idx] == parent_ref[[7L]] & pd$line2[pd_expr_idx] == parent_ref[[8L]]) {
-    line_offset <- parent_ref[[7L]] - parent_ref[[1L]]
-  } else {
-    line_offset <- 0
+  # For `lhs |> call(...)` the srcref covers the whole pipe expression. Use the
+  # parse data of the call on the right-hand side, with `lhs` inserted as its
+  # first argument so it matches the parse data of `call(lhs, ...)`.
+  if (any(pd_child$token == "PIPE")) {
+    lhs <- pd_child[1L, ]
+    rhs_id <- pd_child$id[[nrow(pd_child)]]
+    pd_child <- pd[pd$parent == rhs_id, ]
+    pd_child <- pd_child[order(pd_child$line1, pd_child$col1), ]
+    pd_child <- pd_child[pd_child$token != "COMMENT", ]
+    open <- which(pd_child$token == "'('")[[1L]]
+    comma <- lhs
+    comma$token <- "','"
+    pd_child <- rbind(
+      pd_child[seq_len(open), ],
+      lhs,
+      if (pd_child$token[[open + 1L]] != "')'") comma,
+      pd_child[-seq_len(open), ]
+    )
   }
+
+  # `pd` has either the lines of the file (from `get_parse_data()`) or the
+  # lines of the parsed, collated source (from `getParseData(srcref)`). The
+  # srcrefs created here always use the lines of the file for the first and
+  # last line and the lines of the parsed source for the parsed lines, like
+  # the srcrefs of the parser, so a call gets the same key whichever way its
+  # parse data is found.
+  shift <- parent_ref[[7L]] - parent_ref[[1L]]
+  pd_is_parsed <- pd$line1[pd_expr_idx] == parent_ref[[7L]] &
+    pd$line2[pd_expr_idx] == parent_ref[[8L]]
+  line_offset <- if (pd_is_parsed) shift else 0
+  parsed_offset <- if (pd_is_parsed) 0 else shift
 
   make_srcref <- function(from, to = from) {
     if (length(from) == 0) {
@@ -37,18 +168,23 @@ impute_srcref <- function(x, parent_ref) {
 
     srcref(
       attr(parent_ref, "srcfile"),
-      c(pd_child$line1[from] - line_offset,
+      c(
+        pd_child$line1[from] - line_offset,
         pd_child$col1[from],
         pd_child$line2[to] - line_offset,
         pd_child$col2[to],
         pd_child$col1[from],
         pd_child$col2[to],
-        pd_child$line1[from],
-        pd_child$line2[to]
+        pd_child$line1[from] + parsed_offset,
+        pd_child$line2[to] + parsed_offset
       )
     )
   }
 
+  list(pd = pd, pd_child = pd_child, make_srcref = make_srcref)
+}
+
+impute_conditional <- function(x, pd, pd_child, make_srcref) {
   switch(
     as.character(x[[1L]]),
     "if" = {
@@ -108,14 +244,20 @@ impute_srcref <- function(x, parent_ref) {
 
       exprs <- lapply(exprs, ignore_dots)
 
-      c(list(NULL), lapply(exprs, make_srcref))
-    },
+      src_ref <- c(list(NULL), lapply(exprs, make_srcref))
 
-    NULL
+      # A trailing comma (e.g. `switch(x, a = 1, )`) adds an empty argument
+      # with no expression in the parse data
+      length(src_ref) <- length(x)
+      src_ref
+    }
   )
 }
 
-is_conditional_or_loop <- function(x) is.symbol(x[[1L]]) && as.character(x[[1L]]) %in% c("if", "for", "else", "switch")
+is_conditional_or_loop <- function(x) {
+  is.symbol(x[[1L]]) &&
+    as.character(x[[1L]]) %in% c("if", "for", "while", "switch")
+}
 
 package_parse_data <- new.env()
 
@@ -127,8 +269,11 @@ get_parse_data <- function(srcfile) {
       return(NULL)
     }
 
-    res <- lapply(lines_split,
-      function(x) getParseData(parse(text = x, keep.source = TRUE), includeText = TRUE))
+    res <- lapply(lines_split, function(x) {
+      withr::with_options(c(keep.parse.data = TRUE), {
+        getParseData(parse(text = x, keep.source = TRUE), includeText = NA)
+      })
+    })
     for (i in seq_along(res)) {
       package_parse_data[[names(res)[[i]]]] <- res[[i]]
     }

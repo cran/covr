@@ -1,55 +1,67 @@
-#' Run a system command and check if it succeeds.
-#'
-#' This function automatically quotes both the command and each
-#' argument so they are properly protected from shell expansion.
-#' @param cmd the command to run.
-#' @param args a vector of command arguments.
-#' @param env a named character vector of environment variables.  Will be quoted
-#' @param quiet if `TRUE`, the command output will be echoed.
-#' @param echo if `TRUE`, the command to run will be echoed.
-#' @param ... additional arguments passed to [base::system()]
-#' @return `TRUE` if the command succeeds, an error will be thrown if the
-#' command fails.
-#' @keywords internal
-system_check <- function(cmd, args = character(), env = character(),
-                         quiet = FALSE, echo = FALSE, ...) {
-  full <- paste(c(shQuote(cmd), lapply(args, shQuote)), collapse = " ")
-
-  if (echo) {
-    message(wrap_command(full), "\n")
-  }
-
-  status <- withr::with_envvar(env,
-    system(full, intern = FALSE, ignore.stderr = quiet, ignore.stdout = quiet, ...)
-    )
-
-  if (!identical(as.character(status), "0")) {
-    stop("Command ", sQuote(full), " failed (", status, ")", call. = FALSE)
-  }
-
-  invisible(TRUE)
+# Runs `cmd` with the arguments `args` and the environment variables `env`
+# (a named character vector), without a shell, so they need no quoting.
+# Returns its exit `status` and its standard output and error as `stdout` and
+# `stderr`, in lines. A command that can't be started has status 127 and the
+# reason as its standard error. A nonzero status isn't an error, so callers
+# choose how to handle it.
+run_command <- function(cmd, args = character(), env = character()) {
+  res <- tryCatch(
+    withr::with_envvar(
+      env,
+      sys::exec_internal(cmd, args, error = FALSE)
+    ),
+    error = function(e) {
+      list(
+        status = 127L,
+        stdout = raw(),
+        stderr = charToRaw(conditionMessage(e))
+      )
+    }
+  )
+  list(
+    status = res$status,
+    stdout = raw_to_lines(res$stdout),
+    stderr = raw_to_lines(res$stderr)
+  )
 }
 
-#' Run a system command and capture the output.
-#'
-#' This function automatically quotes both the command and each
-#' argument so they are properly protected from shell expansion.
-#' @inheritParams system_check
-#' @return command output if the command succeeds, an error will be thrown if
-#' the command fails.
-#' @keywords internal
-system_output <- function(cmd, args = character(), env = character(),
-                          quiet = FALSE, echo = FALSE, ...) {
-  full <- paste(c(shQuote(cmd), lapply(args, shQuote)), collapse = " ")
-
-  if (echo) {
-    message(wrap_command(full), "\n")
+raw_to_lines <- function(x) {
+  text <- rawToChar(x[x != 0L])
+  if (!nzchar(text)) {
+    return(character())
   }
-  result <- withCallingHandlers(withr::with_envvar(env,
-    system(full, intern = TRUE, ignore.stderr = quiet, ...)
-    ), warning = function(w) stop(w))
+  strsplit(text, "\r?\n")[[1]]
+}
 
-  result
+# The command as it is shown to the user, with quoted arguments.
+command_line <- function(cmd, args = character()) {
+  paste(c(shQuote(cmd), lapply(args, shQuote)), collapse = " ")
+}
+
+# Runs a command and returns its output, quoting the command and each argument
+# so they are protected from shell expansion. `env` is a named character
+# vector of environment variables to set. The command's standard error is shown
+# unless `quiet`. Signals an error if the command fails.
+system_output <- function(
+  cmd,
+  args = character(),
+  env = character(),
+  quiet = FALSE
+) {
+  res <- run_command(cmd, args, env)
+  if (!quiet && length(res$stderr)) {
+    message(paste(res$stderr, collapse = "\n"))
+  }
+  if (res$status != 0L) {
+    stop(
+      "running command '",
+      command_line(cmd, args),
+      "' had status ",
+      res$status,
+      call. = FALSE
+    )
+  }
+  res$stdout
 }
 
 wrap_command <- function(x) {

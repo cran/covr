@@ -1,3 +1,591 @@
+# covr 4.0.0
+
+This is a major release. It changes how coverage is counted in several places,
+which can lower the coverage covr reports for the same tests; see "Changes to
+reported coverage" below.
+
+## Changes to reported coverage
+
+* Reported line coverage may decrease slightly, as it is now computed the same
+  way everywhere, so `print()`, `percent_coverage()`, `tally_coverage()`,
+  `report()`, `codecov()`, `coveralls()`, `cobertura()`, `sonarqube()` and
+  `lcov()` agree. A line only counts as covered if all its expressions ran,
+  e.g. `if (x) a else b` on one line where `a` never ran is now uncovered in
+  `report()`, `codecov()` and `coveralls()`. Lines shared by several
+  functions, such as `f <- function() 1; g <- function() 2`, are counted once,
+  and `print()` and `percent_coverage()` only count lines with code, not lines
+  with only punctuation such as `}` (#620).
+
+* Expressions in `if` and `switch()` branches without braces now get their
+  own counters when the conditional is a function body or nested in another
+  call, such as `x <- if (a) b else c` or `function(x) if (x) 1 else 2`, or
+  in an argument default. Previously the whole expression shared one counter,
+  so a branch that never ran was reported as covered. Coverage of such code
+  may drop, e.g. `f <- function(x) if (x) 1 else 2` tested only with
+  `f(TRUE)` drops from 100% to 0% line coverage (#279, #682).
+
+* Braceless `while` loop bodies are now counted separately from the loop
+  condition, like `if` and `for` (#732).
+
+* Lines excluded with `# nocov` now stay excluded when they are part of a
+  larger expression that is not entirely excluded, such as the first and last
+  lines of a function defined inside another function (#594).
+
+* Compiled code coverage counts differently in several cases:
+
+  - Lines of C++ templates instantiated more than once in a file are counted
+    once, so `options(covr.gcov_partial = "uncovered")` also works on them
+    (#609).
+  - Lines only reached by C++ exceptions, such as a `catch` block that never
+    ran, now count as not covered instead of being left out of the coverage
+    (#609).
+  - Lines of compiled code that gcov reports as only partially executed (e.g.
+    `if (x) f();` when `f()` never runs) are now included in the coverage.
+    They count as covered, or as not covered with
+    `options(covr.gcov_partial = "uncovered")` (#604). covr now runs gcov with
+    `-a` so partial lines are also found with llvm-cov, the gcov on macOS, and
+    older versions of gcc (#610).
+
+## Breaking changes
+
+* covr now requires R 4.1.0 or later, as does httr2, which it uses for
+  uploads (#760).
+
+* The option `covr.fix_parallel_mcexit` now takes precedence over the
+  environment variable `COVR_FIX_PARALLEL_MCEXIT`, so options always win over
+  the `COVR_*` environment variables. The environment variables accept `true`,
+  `t`, `yes`, `1`, `false`, `f`, `no` and `0` in any case, and warn about other
+  values (#758).
+
+* covr now looks up gcov when it needs it, with the build tools on the `PATH`,
+  rather than setting the `covr.gcov` option when it is loaded, so the gcov of
+  Rtools is found on Windows. `getOption("covr.gcov")` is now `NULL` unless you
+  set it (#758).
+
+* covr no longer supports code coverage with Intel's classic `icc` compiler,
+  which Intel discontinued in 2024, and the `covr.icov`, `covr.icov_args`,
+  `covr.icov_flags` and `covr.icov_prof` options have been removed. Use gcc or
+  clang to measure the coverage of compiled code (#732).
+
+* S4 methods are now named after their generic and signature, as in their Rd
+  aliases, e.g. `show,MyClass-method`, so `print(x, group = "functions")`,
+  `tally_coverage(by = "function")` and the other outputs show which generic
+  each method belongs to. Previously they were named only by their signature,
+  e.g. `numeric#character` (#417). `function_exclusions` patterns that matched
+  the old names need to be updated.
+
+* `azure()` is removed. Use `cobertura(x, file = "coverage.xml")` to write the
+  Cobertura file Azure Pipelines reads (#758).
+
+* `codecov()` now throws an error if the upload to codecov.io fails, so CI
+  jobs that upload coverage fail instead of silently succeeding. The error has
+  class `covr_codecov_error`. Rate limits (HTTP 429) and Codecov outages (HTTP
+  5xx) give a warning of class `covr_codecov_warning` instead, so they don't
+  fail CI (#565).
+
+* `codecov()` uses a new upload protocol, and `base_url` is now the upload API
+  rather than `"https://codecov.io"`; see "CI services and output formats"
+  (#568).
+
+* `codecov()` no longer detects Codeship, Semaphore (classic) and Wercker, which
+  have been shut down. Their environment variables are now ignored and the
+  commit, branch and repository come from the local git repository (#732).
+
+* `coveralls()` now returns the response of Coveralls invisibly, like
+  `codecov()`, and signals an error of class `covr_coveralls_error` for any
+  response that is not HTTP 200 with a JSON body, with the status and the
+  response in its message (#758).
+
+* `coveralls()` now sets `service_name` to `"local"` rather than `"travis-ci"`
+  outside a supported CI service, and the git committer fields are now named
+  as Coveralls expects (`committer_name`, `committer_email`) (#535).
+
+* `package_coverage()` no longer accepts the `exclusions` argument, deprecated
+  in favor of `line_exclusions`. Use `line_exclusions` instead (#732).
+
+* `package_coverage()` no longer has a `pre_clean` argument. Objects in `src/`
+  are always removed before the package is installed, so remove `pre_clean`
+  from calls (#758).
+
+* `sonarqube()` now writes file paths relative to the package root (e.g.
+  `R/foo.R`) instead of prefixing them with the package name, so the report
+  works when the package is the root of the SonarQube project. Use the new
+  `path_prefix` argument if the package is in a subdirectory of the project,
+  e.g. `path_prefix = "mypkg"` restores the previous paths (#636).
+
+* `to_cobertura()` and `to_sonarqube()` are deprecated in favor of
+  `cobertura()` and `sonarqube()`, matching the names of `report()`,
+  `codecov()` and `coveralls()`. Like `report()`, the new functions take the
+  coverage as `x` and the output path as `file`. The old names still work,
+  with their `cov` and `filename` arguments, and warn once per session (#750).
+  `to_cobertura()` only warns in interactive sessions, so CI workflows that
+  call it, such as the coverage workflow of r-lib/actions, don't warn (#765).
+
+## Performance
+
+* Code run to measure coverage is faster. Evaluated expressions are counted in
+  C rather than in R (about 3.5 times less overhead per expression), and
+  instrumented code only checks whether tests are recorded with
+  `covr.record_tests` once, when it is instrumented (#734).
+
+* Combining the coverage of many R processes is much faster for packages with
+  many traces (@erkurtharun, #643).
+
+* Tracing a package is faster, as parse data now keeps text only for terminal
+  tokens (@erkurtharun, #644).
+
+* `cobertura()` and `sonarqube()` are much faster for large packages, as they
+  write the XML of the lines as text and parse it once, rather than adding each
+  line with xml2 (e.g. 0.3 s rather than 7.5 s, and 0.2 s rather than 3.2 s,
+  for Luminescence). The files they write are unchanged (#755).
+
+* `package_coverage()` instruments and byte-compiles a source package once,
+  after installing it, rather than every time a process loads it, so each
+  process that loads it starts faster (e.g. 0.3 s rather than 4.6 s for
+  Luminescence) and doesn't compile the functions again as it runs them. If
+  that isn't possible, e.g. the package has functions in `R/sysdata.rda`, the
+  package is instrumented when it is loaded, as before. Set
+  `options(covr.install_instrument = FALSE)` (or the environment variable
+  `COVR_INSTALL_INSTRUMENT=false`) to always do that (#740).
+
+* `package_coverage()` is faster and uses much less memory when the code
+  starts many R processes that load the package. Each process now saves only
+  the counts it recorded, which are added to the counters saved when the
+  package was instrumented, rather than all its counters and their source
+  references (a few KB rather than 1 MB per process for languageserver), and
+  the traces of the processes are added up as they are read. Merging the
+  traces of languageserver's tests, which start about 1,000 processes, now
+  takes 1 s and 144 MB, where it previously ran out of memory at 7 GB (#744).
+
+* `percent_coverage()`, `tally_coverage()`, `zero_coverage()`, `report()` and
+  the exclusions in `package_coverage()` are faster for packages with many
+  files, as the package source is now split into files once rather than once
+  per file (#733).
+
+* `report()`, `report_html()` and `file_report_html()` are much faster for
+  large packages, as the source table is built as text rather than an
+  htmltools tag per line (e.g. 6 minutes to a few seconds for Luminescence)
+  (#733).
+
+* `tally_coverage()`, and so `percent_coverage()`, `zero_coverage()`,
+  `coverage_to_list()` and the reports, are about 4 times faster for large
+  coverage objects, and `print()` about 8 times faster (e.g. 0.16 s rather than
+  0.7 s, and 0.18 s rather than 1.4 s, for Luminescence). The rows of
+  `tally_coverage(by = "line")` are now numbered from 1 (#745).
+
+## Branch coverage
+
+* New experimental branch coverage of R code. With
+  `options(covr.branch_coverage = TRUE)`, covr also records which branches of
+  each `if` (including an `if` without an `else`) and `switch()` were taken,
+  in the `branches` attribute of the coverage object.
+  `tally_coverage(by = "branch")` and `percent_coverage(by = "branch")`
+  summarize them, and `report()`, `file_report()`, `lcov()`, `cobertura()`,
+  `codecov()` and `coveralls()` include them. Line coverage is unchanged, and
+  without the option the code is instrumented as before, so there is no cost.
+  See `?covr.branch_coverage` (#279).
+
+## Measuring more code
+
+* Functions of a package that are sent to other R processes, e.g. parallel
+  workers, are now counted there if the process loads the package (#740).
+
+* Functions nested inside lists and environments, such as
+  `fns <- list(a = function(x) x)`, functions defined inside `local()` and
+  ggproto methods, can now be traced. This is off by default; enable it for a
+  package with `Config/covr/full_traversal: true` in its DESCRIPTION, or with
+  `options(covr.full_traversal = TRUE)` (#113).
+
+* Coverage is now reported for S7 property getters, setters, and validators
+  with S7 > 0.2.2, which stores class callbacks in a shared class reference
+  (@t-kalinowski, #646).
+
+* Tracing functions in packages, R6 classes, S7 objects and box modules now
+  skips active bindings, so ones that fail when read (e.g.
+  `makeActiveBinding('x', function() stop('boom'), environment())`) don't
+  break tracing (#732).
+
+* `file_coverage()` can now measure the coverage of a package's compiled code
+  in the current session, e.g. `file_coverage("src/foo.c", "tests/foo.R")`,
+  which is much faster than `package_coverage()`. It loads the package with
+  `pkgload::load_all()`, builds an instrumented copy of it in the session's
+  temporary directory, and only recompiles the files that changed on later
+  runs. `environment_coverage()` and `with_coverage()` also include the
+  compiled code of packages loaded with `pkgload::load_all()`, so
+  `devtools::test_coverage_active_file()` now works for files in `src/`
+  (#605).
+
+* `file_coverage()`, `environment_coverage()` and `with_coverage()` also
+  measure the Rust code of packages loaded with `pkgload::load_all()`, e.g.
+  `file_coverage("src/rust/src/lib.rs", "tests/foo.R")`, like
+  `package_coverage()` does. cargo only recompiles the crates that changed in
+  the instrumented copy. Without the llvm tools covr warns and skips the Rust
+  code, and `options(covr.llvm_cov = "")` turns this off (#749).
+
+* `file_coverage()`, `code_coverage()`, `environment_coverage()`,
+  `function_coverage()` and `with_coverage()` now include code run in
+  processes forked by parallel's `mclapply()`, `mcparallel()` and related
+  functions, as `package_coverage()` already did. Set
+  `options(covr.fix_parallel_mcexit = FALSE)` to turn this off (#410).
+
+* `package_coverage()` now measures the coverage of Rust code, such as the
+  code of packages using extendr or savvy. It's built with LLVM's source-based
+  coverage, which needs the llvm tools of the Rust toolchain
+  (`rustup component add llvm-tools`), or for Rust installed by a Linux
+  distribution, those of the LLVM version rustc uses (e.g. `llvm-cov-18`).
+  Without them, covr warns and measures everything except the Rust code.
+  `options(covr.llvm_cov = "")` turns this off (#728).
+
+* `package_coverage()` now measures the coverage of installed packages, e.g.
+  `package_coverage(system.file(package = "pkg"))`, so the package source isn't
+  needed. The package must be installed with `--install-tests` and
+  `--with-keep.source`, and `package_coverage()` errors if it wasn't (#638).
+
+* New `shiny_app_coverage()` measures the coverage of a Shiny app that isn't
+  part of a package while its tests run, by default with
+  `shinytest2::test_app()`, including the code run by the app in the R
+  processes that shinytest2 starts. The new `vignette("shiny")` describes how
+  to measure the coverage of Shiny apps, including tests run with shinytest2
+  and apps that aren't in a package (#277).
+
+## Reports
+
+* The RStudio addin now prints a message when it starts calculating coverage,
+  so there is feedback before the report opens (#404).
+
+* `file_report()` now creates the directory of `out_file` if needed and
+  returns its absolute path, like `report()` (#758).
+
+* `file_report()` highlights the syntax of the source code again; it failed
+  with JavaScript errors as the report didn't include jQuery (#708).
+
+* `report()` highlights code with highlight.js 11, which supports light and
+  dark themes (#758).
+
+* `report()`'s file list is easier to read: the column headers stay on one
+  line, `Hits / Line` is renamed to `Hits/line` and shows one decimal place (or
+  `<0.1`) with a tooltip explaining it, numbers line up, and a row with the
+  totals follows the files when there are several (#756).
+
+* `report()`'s file list only wraps file names after a `/` in narrow reports,
+  e.g. one embedded with `report_html()`, and scrolls horizontally if it
+  doesn't fit, rather than cutting off the last columns (#763).
+
+* `report()` and `file_report()` no longer need the DT package, jQuery or
+  Bootstrap, and no longer bundle Bootstrap, whose bundled version had known
+  security vulnerabilities (#639). The file list is now sorted with the least
+  covered files first (#316).
+
+* `report()` and `file_report()` use a dark theme when the browser prefers
+  one, and have a button to switch between the light and dark themes, which
+  the browser remembers for other reports (#563).
+
+* `report()`, `file_report()` and their `_html()` versions show branch
+  coverage when it was measured: lines with branches show how many were taken
+  (e.g. `1/2`, with each branch's label and count on hover), lines with an
+  untaken branch are shown as partly covered in the `partial` color of
+  `covr.report_colors` (yellow by default), and the file list has a "Branches"
+  column, with the overall percentage of branches taken in the title. Reports
+  without branch coverage are unchanged (#751).
+
+* `report()`, `file_report()` and the coverage percentages printed in the
+  console can use other colors for covered and missed code, set with the new
+  `covr.report_colors` option. The new `colorblind_palette` has blue, yellow
+  and vermillion from the Okabe-Ito palette, which are easier to tell apart
+  with color vision deficiency than the default green and red:
+  `options(covr.report_colors = covr::colorblind_palette)`. An optional
+  `partial` element sets the color for 75% to 90% coverage and for partly
+  covered lines with branch coverage. The coverage bars in `report()` now use
+  the same thresholds as the console, so files with exactly 75% or 90%
+  coverage get the higher color (#529, #751).
+
+* `report()` now keeps the Files / Source tabs at the top of the page while
+  scrolling, and returning to the file list restores its scroll position
+  (#232).
+
+* `report()` now works when the coverage object has no traces; it failed with
+  "invalid argument to unary operator" (#540).
+
+* New `report_html()` and `file_report_html()` return the coverage reports of
+  `report()` and `file_report()` as HTML that can be included in a larger
+  document, such as an R Markdown or Quarto document. The reports' styles and
+  scripts only apply to the report, and a report doesn't replace the
+  document's highlight.js, so a document can include several reports without
+  changing the rest of the page (#709).
+
+## CI services and output formats
+
+* covr uses httr2 instead of httr to upload coverage to Codecov and Coveralls
+  (#758).
+
+* New `badge()` writes an SVG badge with the percent coverage, so a README
+  can show coverage without uploading it to Codecov or Coveralls. The README
+  has an example GitHub Actions workflow that publishes the badge (#634).
+
+* `cobertura()` now only lists the lines of a method from the file it is
+  defined in, so methods sharing a name across files, such as the
+  `initialize()` methods of R6 classes, don't list each other's lines, and
+  Codecov shows the correct line numbers and the same coverage as `print()`
+  (#629).
+
+* `codecov()` and `coveralls()` use the current Drone variables
+  `DRONE_COMMIT_BRANCH`, `DRONE_COMMIT_SHA` and `DRONE_BUILD_LINK`, and fall
+  back to the old ones (#758).
+
+* `codecov()` now uploads with Codecov's current upload protocol, a request to
+  `https://ingest.codecov.io` for an upload followed by sending the coverage to
+  the location it returns, instead of the legacy `/upload/v2` endpoint, which
+  Codecov has deprecated and which doesn't support organization-level upload
+  tokens. The repository and git service come from the CI service or the
+  `origin` remote. Without a token, pull requests from forks on GitHub Actions
+  are uploaded from an unprotected branch (`owner:branch`), like
+  `codecov/codecov-action` does, and on GitHub Actions pull requests use the
+  head commit of the pull request (#568, #464).
+
+* `codecov()` now returns the response of Codecov, which includes the `url` of
+  the upload (#568).
+
+* `codecov()` outside a git repository now gives its "Can't determine the
+  repository" error, rather than a raw git error (#732).
+
+* New `coverage_to_markdown()` formats coverage as a markdown table, optionally
+  compared against a baseline, for GitHub Actions job summaries or pull
+  request comments (#519).
+
+* `coveralls()` uses the environment variable `COVERALLS_REPO_TOKEN` if
+  `COVERALLS_TOKEN` is not set, and deletes the temporary file with the
+  coverage it uploaded (#758).
+
+* `coveralls()` now detects the CI service, job and pull request on the
+  services that `codecov()` supports, e.g. GitHub Actions, instead of
+  assuming Travis CI. With a `repo_token`, it also submits the git commit,
+  branch and remote on every service, or from the local git repository
+  outside CI, so the Coveralls badge is updated for the right branch (#535).
+
+* New `lcov()` writes coverage as an LCOV tracefile (`lcov.info`), for
+  `genhtml` and other tools that read the LCOV format (#442, thanks to
+  @MichaelChirico for the initial implementation in #637).
+
+* `sonarqube()` now reports the lines of compiled code, and with branch
+  coverage (`options(covr.branch_coverage = TRUE)`) the `branchesToCover` and
+  `coveredBranches` of each line (#758).
+
+## Working with coverage results
+
+* Error and warning messages are shorter and follow the tidyverse style guide,
+  starting with a short statement of the problem followed by bulleted details,
+  e.g. for unpaired `# nocov start` / `# nocov end` lines (#710).
+
+* The error for unpaired `# nocov start` and `# nocov end` comments now gives
+  the name of the file along with the line numbers of the comments (#409).
+
+* `covr_error` conditions (and the `covr_warning`s from `allow_failures`) now
+  keep the whole failure output in `$output` and its file in `$file`. The
+  message shows the last 50 lines, bounded by `warning.length` in characters,
+  and `print()` shows the last `n` lines, 50 by default. The number of lines
+  can be set with `options(covr.failure_lines)` (#570, #642).
+
+* New `annotate_coverage()` shows the source of the missed lines, or any other
+  lines, as plain text with their execution counts, so coverage can be read
+  without the HTML report, e.g. by coding agents. With branch coverage, lines
+  with a branch that was never taken are shown and marked too. Its output is
+  capped at 200 source lines (`max_lines`, or the `covr.annotate_max_lines`
+  option), ending with how many lines were left out (#742).
+
+* `c()` now combines coverage objects, e.g. from runs of tests in different
+  directories. The counts of traces in several objects are added, and recorded
+  tests are combined as well (#439).
+
+* New `current_coverage()` returns the coverage measured so far in the current
+  process, and can reset the counts, so code run by covr can measure the
+  coverage of parts of a run, such as each test file. Use it rather than
+  reading covr's internal counters, which no longer show the counts while code
+  runs (#759).
+
+* `print()` of coverage objects gains `missing` and `n` arguments.
+  `missing = TRUE` lists the missed lines of each file or function as ranges
+  such as `41-48, 112`, and the missed branches if branch coverage was
+  measured; at most 10 ranges and branches are listed for each file or
+  function, which can be changed with the `covr.print_max_ranges` option. `n`
+  limits the number of files or functions printed, showing the least covered
+  first. The branch coverage percentage is shown when it was measured (#215,
+  #742).
+
+* `tally_coverage()` gains `by = "function"`, with one row for each function,
+  so `zero_coverage(cov, by = "function")` lists the functions that were
+  never run. `percent_coverage()` and `print()` also accept it (#245).
+
+* New `tally_tests()` returns a traceability matrix from coverage recorded with
+  `options(covr.record_tests = TRUE)`: which tests ran each line of code, with
+  the test file, line and `test_that()` description, so you can find the tests
+  to rerun after changing some lines (#361).
+
+* `value()` now works on coverage objects of R code, not only compiled code.
+  The structure of coverage objects is now documented in `?coverage`, and
+  `as.data.frame()` on a coverage object in `?as.data.frame.coverage` (#564).
+
+## Running coverage
+
+* Trace files are now written atomically, and a failure to save or read one
+  is reported as a `covr_error` (a `covr_warning` with `allow_failures = TRUE`)
+  naming the file, rather than a cryptic `readRDS()` error (#509).
+
+* `file_coverage()` gains a `runner` argument to choose how test files are
+  run. `runner = testthat::test_file` runs them with testthat's test runner,
+  so `expect_snapshot()` and other features that need it work (#501).
+
+* `package_coverage()` gains an `allow_failures` argument (default
+  `getOption("covr.allow_failures", FALSE)`). When `TRUE`, failing tests,
+  vignettes, examples or `code` produce a warning instead of an error and
+  coverage is still returned, e.g. so `covr::report()` can be viewed after a
+  long test run with a failure (#533).
+
+* `package_coverage()` gains a `show_code_output` argument. If `TRUE`, the
+  output of `code` is shown on the console while it runs, e.g. to follow it in
+  the logs of a CI job, rather than only being shown when `code` fails
+  (@gergness, #558).
+
+* `package_coverage()` now keeps `install_path` when coverage fails, or when
+  failures are reported as warnings with `allow_failures = TRUE`, so the
+  output files they refer to can be inspected (@hadley, #554, #615).
+
+* `package_coverage()` now accepts `outDir` in `...` to save the test and
+  example output to a directory of your choice, instead of failing with
+  "formal argument "outDir" matched by multiple actual arguments" (#518).
+
+* `package_coverage()` now warns when an R process started by the tests, such
+  as a Shiny app, callr session or future worker, loaded the package but did
+  not save its coverage because it was killed or was still running when the
+  tests finished. That coverage used to be silently missing, so the results
+  could vary from run to run (#438).
+
+* `package_coverage()` now works in renv projects when the package imports
+  renv, or a package that embeds it such as vetiver, as covr no longer passes
+  its library paths as site libraries, which renv removes (#560).
+
+* `package_coverage()` now keeps the coverage measured so far, and doesn't
+  fail with "'from' must be a finite number", when `code` loads the package
+  again with `pkgload::load_all()`, e.g. via `devtools::test()` (#641).
+
+* `package_coverage(combine_types = FALSE)` now works when its arguments are
+  local variables of the calling function (#732).
+
+* New `with_coverage()` measures the coverage of arbitrary code, such as
+  `testthat::test_file()`, run against an environment like a package namespace
+  loaded with `pkgload::load_all()`. This allows tools such as
+  `devtools::test_coverage_active_file()` to use testthat's own runner instead
+  of recreating it, so setup files and fixtures found with
+  `testthat::test_path()` work as they do in `testthat::test_file()` (related
+  to #543, #551).
+
+## Compiled code
+
+* Compiled code in packages that set `CXX_STD = CXX23` is now instrumented
+  (#758).
+
+* Compiled code coverage only reads the gcov reports written by each gcov
+  run, so stale `.gcov` files in `src/` are left alone (#758).
+
+* Source files are now matched against the package directory and
+  `covr.gcov_additional_paths` by whole path components, not by a prefix
+  anywhere in the path. Native files in `covr.gcov_additional_paths` are now
+  kept when `covr.filter_non_package` is set (#758).
+
+* Compiled code coverage now reads gcov's structured JSON output
+  (`gcov --json-format`) when gcov supports it (gcc >= 9), instead of parsing
+  its text output with regular expressions. covr still parses the text output
+  of llvm-cov, the gcov on macOS, and older gcc, and falls back to it for any
+  file whose JSON output is missing or can't be read (#609).
+
+* `options(covr.gcov = "")` once again turns off coverage of compiled code,
+  as documented, instead of failing with "gcov not found" (#516).
+
+* When gcov fails, the error from `package_coverage()` now includes gcov's
+  output, e.g. the `.gcno` version mismatch reported when the package was
+  compiled with a different version of gcc than the gcov used (#537).
+
+* `package_coverage()` now also excludes the `inst/include/<pkg>_RcppExports.h`
+  header that Rcpp generates for `// [[Rcpp::interfaces(cpp)]]`, like the other
+  files generated by Rcpp and cpp11. These generated files are now also
+  excluded with `relative_path = FALSE` or a custom `relative_path` (#531).
+
+## Bug fixes
+
+* Coverage of a file whose name starts with `tests` is no longer mistaken for
+  recorded tests (#758).
+
+* `relative_path = "/"` and other filesystem roots, such as `C:/`, are no
+  longer changed when trailing slashes are removed (#758).
+
+* The `COVR_COVRIGNORE` environment variable is now read each time it is
+  needed, rather than only when covr is loaded (#758).
+
+* Tracing a `switch()` call with fall-through cases (`a = ,`) whose subject is
+  piped in with the base pipe (`x |> switch(...)`) no longer errors with
+  "argument is missing, with no default" (#630).
+
+* Tracing a `switch()` call with a trailing comma no longer warns, which was
+  an error under `options(warn = 2)` (#483).
+
+* Measuring the coverage of httr and its dependencies, such as R6, no longer
+  fails with a cyclic namespace dependency (#623).
+
+* Replacing traced functions in place no longer risks a generational
+  garbage-collection bug, and doesn't permanently keep their bodies or
+  environments (#640).
+
+* Two fixes for `options(covr.record_tests = TRUE)` (#627):
+
+  - Objects used in tests can now be garbage collected. covr kept the
+    environment of the last test call, which made tests that check that
+    objects are finalized fail, e.g. in websocket.
+  - Tests without srcrefs, such as the scripts in `tests/` that don't use
+    testthat, are now recorded once and counted when they run again, e.g. in a
+    loop, like tests with srcrefs. Each run was recorded as a new test, and
+    finding the test got slower with every run, so the coverage of bitops
+    never finished.
+
+* With `options(covr.record_tests = TRUE)`, tests that call the package through
+  code with source references, e.g. testthat expectations when rlang was
+  installed with `R_KEEP_PKG_SOURCE=yes`, are no longer all recorded as a
+  single test named after that code (#723).
+
+* With `options(covr.record_tests = TRUE)`, functions in the recorded test
+  calls, such as those of R6 active bindings, no longer keep their environment.
+  Saving the coverage of tests that used an active binding of an R6 object
+  holding data read with arrow crashed R (#573).
+
+* With `options(covr.record_tests = TRUE)`, merging coverage now correctly
+  renumbers the test indices of traces that are absent from the first
+  coverage object (#643).
+
+* Fixed two rare crashes and an error with `options(covr.record_tests = TRUE)`
+  (@maksymiuks, #631).
+
+* `package_coverage()` no longer crashes R when a package stores data read
+  with arrow in an environment of its namespace, e.g. in a fastmap. The
+  coverage saved by each R process included the contents of the package's
+  environments, which are no longer saved, so it is also smaller (#602).
+
+* `package_coverage()` no longer reports 0% coverage for packages whose last
+  file in `R/` is empty (#522).
+
+* `package_coverage()` no longer reports spurious uncovered lines for braceless
+  `if`, `for` and `switch` conditions when some of the R processes that load
+  the package run with `options(keep.parse.data = FALSE)` (#732).
+
+* `print()` of a coverage object no longer fails or prints the wrong text for
+  file or function names that contain braces (#758).
+
+* `with_coverage()`, `function_coverage()` and the other functions that
+  measure coverage now restore the functions wrapped by `Vectorize()` and
+  `memoise::memoise()`, so later measurements of them are no longer lost.
+  Functions are only treated as `Vectorize()` wrappers if they have the
+  wrapper's own bindings (#758).
+
+* `zero_coverage()` no longer errors in RStudio when rstudioapi isn't
+  installed (#732).
+
 # covr 3.6.5
 
 ## New Features and improvements
@@ -40,6 +628,9 @@
 * `package_coverage()` now works correctly with ignore files when it is not run in the package root directory (@mpadge, #538)
 
 # covr 3.6.2
+
+* Fix S3 generic/method signature consistency and skip an R6 test on R-devel,
+  for CRAN checks (#534).
 
 # covr 3.6.1
 

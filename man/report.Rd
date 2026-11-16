@@ -17,12 +17,62 @@ report(
 
 \item{browse}{whether to open a browser to view the report.}
 }
-\description{
-Display covr results using a standalone report
+\value{
+\code{report()} returns the absolute path of the report file,
+invisibly.
 }
+\description{
+\code{report()} saves the coverage report as a standalone HTML file and opens it.
+To include the report in a larger document, such as an R Markdown or Quarto
+document, use \code{\link[=report_html]{report_html()}} instead.
+}
+\section{Branches}{
+
+If branch coverage was measured with \code{options(covr.branch_coverage = TRUE)}
+(see \link{covr.branch_coverage}), the report also shows the branches of each
+\code{if} and \code{switch()}. The title has the percentage of branches taken after
+the line coverage, and the list of files has a "Branches" column with the
+percentage of the branches of each file that were taken. In the source, a
+line with branches has the number of its branches taken out of the total,
+e.g. \code{1/2}; hovering over it or focusing it shows the label and count of
+each branch. A line with a branch that wasn't taken is shown as partly
+covered, unless its \code{if} or \code{switch()} never ran, which leaves it missed.
+}
+
+\section{Colors}{
+
+Covered lines are shown in green and missed lines in red. To use other
+colors, set the \code{covr.report_colors} option to a named character vector of
+R colors (anything accepted by \code{\link[grDevices:col2rgb]{grDevices::col2rgb()}}; transparency is
+ignored) with elements \code{covered}, \code{missed} and/or \code{partial}. The colors are
+used for the highlighted lines and the coverage bars in the file list;
+\code{partial} is used for the bars of files with at least 75\% but less than 90\%
+coverage, which otherwise follow \code{covered}, and for the partly covered lines
+of reports with branches, which are otherwise yellow.
+
+\link{colorblind_palette} has colors that are easier to tell apart with color
+vision deficiency:
+
+\if{html}{\out{<div class="sourceCode r">}}\preformatted{options(covr.report_colors = covr::colorblind_palette)
+}\if{html}{\out{</div>}}
+}
+
+\section{Dark mode}{
+
+The report uses a dark theme if the browser or operating system is set to
+prefer one. The moon (or sun) button at the top right switches between the
+light and dark themes; the browser remembers the choice for other reports
+until it is switched back.
+}
+
 \examples{
 \dontrun{
 x <- package_coverage()
 report(x)
+
+# Colors that are distinguishable with most kinds of color blindness
+old <- options(covr.report_colors = colorblind_palette)
+report(x)
+options(old)
 }
 }
